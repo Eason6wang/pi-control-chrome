@@ -3,6 +3,7 @@ export declare function applyBrowserToolMask(api: {
   getActiveTools(): readonly string[];
   setActiveTools(names: string[]): void;
 }, active: boolean): void;
+export declare function transcriptHasBrowserTools(entries: readonly unknown[] | undefined): boolean;
 export declare function createBrowserActivation(options?: { lazyTools?: boolean }): {
   readonly active: boolean;
   readonly used: boolean;

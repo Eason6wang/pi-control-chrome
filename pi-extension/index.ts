@@ -7,7 +7,7 @@ import { dirname, join, resolve } from "node:path";
 import WebSocket from "ws";
 import { Type } from "typebox";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
-import { applyBrowserToolMask, createBrowserActivation } from "./activation.js";
+import { applyBrowserToolMask, createBrowserActivation, transcriptHasBrowserTools } from "./activation.js";
 import { compactBridgeHealth, compactBrowserResult, compactDoctorResult, compactStatusResult, runtimeDiagnosis } from "./output.js";
 
 const BRIDGE_HOST = "127.0.0.1";
@@ -2166,6 +2166,14 @@ export default function piControlChrome(pi: ExtensionAPI): void {
     applyBrowserToolMask(pi, active);
     browserToolsActive = browserActivation.setActive(active);
   };
+  // Session start keeps the loadout Pi restored from the transcript: a thread that already
+  // had browser control keeps its tools, so the next request does not rewrite the cached
+  // prompt by removing ~40 tool declarations (and re-adding them on the next browser use).
+  const resetActivationForSessionStart = (ctx: ExtensionContext) => {
+    browserActivation.reset();
+    if (LAZY_TOOLS && transcriptHasBrowserTools(ctx.sessionManager?.getBranch?.())) browserActivation.setActive(true);
+    setBrowserTools(browserActivation.active);
+  };
   const updateStatus = (ctx: ExtensionContext, text: string) => ctx.ui.setStatus("pi-control-chrome", text);
   const humanCall = (method: string, params: Record<string, unknown> = {}) => call(method, params, { allowInactive: true });
   const resetSessionNow = async (ctx: ExtensionContext, status: string, expectedSessionId?: string) => {
@@ -2373,8 +2381,7 @@ export default function piControlChrome(pi: ExtensionAPI): void {
         bridgeUsed = true;
         browserTargetUsed = true;
         turnCleanupArmed = true;
-        browserActivation.reset();
-        setBrowserTools(browserActivation.active);
+        resetActivationForSessionStart(ctx);
         updateStatus(ctx, "chrome: ready; browser cleanup pending");
         return;
       }
@@ -2393,9 +2400,8 @@ export default function piControlChrome(pi: ExtensionAPI): void {
     browserRunId = undefined;
     browserRunSequence = 0;
     agentRunCleanupDone = false;
-    browserActivation.reset();
     paused = false;
-    setBrowserTools(browserActivation.active);
+    resetActivationForSessionStart(ctx);
     updateStatus(ctx, "chrome: ready");
   });
 

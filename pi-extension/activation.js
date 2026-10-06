@@ -18,6 +18,29 @@ export function applyBrowserToolMask(api, active) {
 }
 
 /**
+ * Whether the session transcript leaves the browser tools declared to the model.
+ *
+ * Pi records tool changes as system messages (`toolsAdded` / `toolsRemoved`) and restores
+ * that loadout when a session is resumed, forked or reloaded. Hiding the tools again at
+ * session start would make the next request remove every browser declaration and a later
+ * one add them back, and each change rewrites the provider's cached prompt prefix.
+ *
+ * @param entries - session entries from `ctx.sessionManager.getBranch()`.
+ * @returns true when the latest browser tool change in the transcript added them.
+ */
+export function transcriptHasBrowserTools(entries) {
+  const names = new Set(BROWSER_TOOL_NAMES);
+  let active = false;
+  for (const entry of entries ?? []) {
+    const message = entry?.type === 'message' ? entry.message : undefined;
+    if (message?.role !== 'system') continue;
+    if (message.toolsRemoved?.some(tool => names.has(tool?.name))) active = false;
+    if (message.toolsAdded?.some(tool => names.has(tool?.name))) active = true;
+  }
+  return active;
+}
+
+/**
  * Create the session-scoped state used to gate Pi's statically registered tools.
  *
  * @param options - whether the browser names start hidden.
