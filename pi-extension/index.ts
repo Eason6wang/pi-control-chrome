@@ -370,7 +370,13 @@ export class BridgeClient {
     const bridgePath = fileURLToPath(new URL("../bridge/server.mjs", import.meta.url));
     if (!existsSync(bridgePath)) throw new Error(`Missing Pi browser bridge: ${bridgePath}`);
     const tokenFile = join(process.env.USERPROFILE || process.env.HOME || process.cwd(), ".pi", "agent", "pi-control-chrome.token");
-    const child = spawn(process.execPath, [
+    // In Pi GUI process.execPath is Electron, which cannot execute this Node
+    // script as a normal child process. Finder launches also lack fnm's PATH.
+    const nodeBinary = process.versions.electron
+      ? "/Users/eason/.local/share/fnm/node-versions/v22.23.1/installation/bin/node"
+      : process.execPath;
+    if (!existsSync(nodeBinary)) throw new Error(`Missing Node binary for Pi browser bridge: ${nodeBinary}`);
+    const child = spawn(nodeBinary, [
       bridgePath,
       "--port", String(BRIDGE_PORT),
       "--token-file", tokenFile,
@@ -1203,16 +1209,44 @@ async function call(method: string, params: Record<string, unknown> = {}, option
   }
 }
 
-function normalizeBrowserParams(params: Record<string, unknown>): Record<string, unknown> {
+function normalizeBrowserParams(method: string, params: Record<string, unknown>): Record<string, unknown> {
   const normalized = { ...params };
-  for (const key of ["snapshotId", "incarnation", "selector", "path"]) {
+  for (const key of ["snapshotId", "incarnation", "selector", "ref", "path", "url", "urlIncludes", "text"]) {
     if (typeof normalized[key] === "string" && normalized[key].trim().length === 0) delete normalized[key];
+  }
+  for (const key of ["textAny", "failureTextAny"]) {
+    if (Array.isArray(normalized[key]) && normalized[key].length === 0) delete normalized[key];
+  }
+  if (normalized.handle && typeof normalized.handle === "object" && !Array.isArray(normalized.handle)) {
+    normalized.handle = Object.fromEntries(Object.entries(normalized.handle).filter(([, value]) =>
+      typeof value !== "string" || value.trim().length > 0));
+  }
+  if (normalized.target && typeof normalized.target === "object" && !Array.isArray(normalized.target)) {
+    const target = Object.fromEntries(Object.entries(normalized.target).filter(([, value]) =>
+      typeof value !== "string" || value.trim().length > 0));
+    // Some gateways materialize every optional target field. A snapshot ref is
+    // already a complete address; a duplicate, partially empty target can
+    // divert the Bridge into semantic locator resolution instead.
+    const hasAddress = ["ref", "selector", "role", "label", "placeholder", "text", "testId"].some(key => target[key] !== undefined);
+    if (!hasAddress || (typeof normalized.ref === "string" && target.ref === normalized.ref)) {
+      delete normalized.target;
+    } else {
+      normalized.target = target;
+    }
+  }
+  if (method === "wait" && ["load", "url"].includes(String(normalized.state ?? "load"))) {
+    // Arena may populate text conditions even when the model selected a URL
+    // or load wait. Those states have mutually exclusive criteria in the Bridge.
+    delete normalized.text;
+    delete normalized.textAny;
+    delete normalized.failureTextAny;
+    delete normalized.target;
   }
   return normalized;
 }
 
 async function callBrowserRequest(method: string, params: Record<string, unknown> = {}, options: BrowserCallOptions = {}, requestSignal?: AbortSignal) {
-  params = normalizeBrowserParams(params);
+  params = normalizeBrowserParams(method, params);
   const requestSessionId = sessionId;
   const requestTurn = currentBrowserTurnId();
   const requestGeneration = lifecycleGeneration;
@@ -1599,7 +1633,10 @@ function registerBrowserTools(pi: ExtensionAPI) {
       allowRedirects: Type.Optional(Type.Boolean({ description: "Allow the final URL to differ from the requested URL while waiting; browser URL canonicalization is accepted even when false." })),
     }),
     async execute(_toolCallId, params) {
-      try { return textResult(compactBrowserResult("browser_new_tab", { ...params, sessionId }, await call("new_tab", params))); } catch (error) { return errorResult(error); }
+      // Some OpenAI-compatible gateways materialize an omitted optional number as 0.
+      // Chrome does not accept windowId 0; omitting it selects the current window.
+      const requestParams = params.windowId === 0 ? { ...params, windowId: undefined } : params;
+      try { return textResult(compactBrowserResult("browser_new_tab", { ...requestParams, sessionId }, await call("new_tab", requestParams))); } catch (error) { return errorResult(error); }
     },
   });
 
