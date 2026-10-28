@@ -797,6 +797,70 @@ test("control-plane status and tab inventory stay responsive behind a stuck page
 });
 
 
+function stuckEvaluateFixture() {
+  // Runtime.evaluate on the page that runs "never" never answers, like an awaitPromise evaluate on a promise that never settles.
+  const fixture = loadExtension({
+    debuggerCommandResult: (method, params) => (params?.expression === "never" ? new Promise(() => {}) : { result: { type: "number", value: 2 } }),
+  });
+  fixture.tabs.set(7, { id: 7, windowId: 1, title: "stuck", url: "https://example.test/stuck" });
+  fixture.tabs.set(8, { id: 8, windowId: 1, title: "other", url: "https://example.test/other" });
+  return fixture;
+}
+
+function bridgeResponse(fixture, id) {
+  return fixture.heartbeatMessages.find((message) => message.type === "response" && message.id === id);
+}
+
+async function within(ms, promise, label) {
+  let timer;
+  try {
+    return await Promise.race([promise, new Promise((_, reject) => { timer = setTimeout(() => reject(new Error(`${label} did not finish within ${ms}ms`)), ms); })]);
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+test("a cancelled evaluate that never settles does not hold the Bridge queue for later page requests", async () => {
+  const fixture = stuckEvaluateFixture();
+  await new Promise((resolve) => setTimeout(resolve, 0));
+  fixture.emitSocketOpen();
+
+  const stuck = fixture.emitSocketMessage({ type: "request", id: "stuck", method: "evaluate", params: { tabId: 7, sessionId: "session-test", expression: "never" } });
+  const next = fixture.emitSocketMessage({ type: "request", id: "next", method: "evaluate", params: { tabId: 8, sessionId: "session-test", expression: "1+1" } });
+  await new Promise((resolve) => setTimeout(resolve, 20));
+  assert.equal(bridgeResponse(fixture, "next"), undefined, "the next request waits behind the running one");
+
+  // The Bridge cancels the request when its own timeout passes.
+  await fixture.emitSocketMessage({ type: "cancel", id: "stuck" });
+  await within(2000, Promise.all([stuck, next]), "queued requests after cancel");
+  assert.equal(bridgeResponse(fixture, "stuck")?.error?.code, "BROWSER_OPERATION_UNCERTAIN");
+  assert.equal(bridgeResponse(fixture, "next")?.error, undefined, JSON.stringify(bridgeResponse(fixture, "next")));
+  assert.equal(bridgeResponse(fixture, "next")?.result?.tabId, 8);
+});
+
+test("an evaluate that never settles stops waiting at its deadline and the next page request runs", async () => {
+  const fixture = stuckEvaluateFixture();
+  await new Promise((resolve) => setTimeout(resolve, 0));
+  fixture.emitSocketOpen();
+
+  const stuck = fixture.emitSocketMessage({ type: "request", id: "stuck", method: "evaluate", params: { tabId: 7, sessionId: "session-test", expression: "never", timeoutMs: 50 } });
+  const next = fixture.emitSocketMessage({ type: "request", id: "next", method: "evaluate", params: { tabId: 8, sessionId: "session-test", expression: "1+1" } });
+  await within(2000, Promise.all([stuck, next]), "queued requests after the evaluate deadline");
+  const failure = bridgeResponse(fixture, "stuck")?.error;
+  assert.equal(failure?.code, "BROWSER_OPERATION_UNCERTAIN");
+  assert.match(failure?.message ?? "", /did not settle within 0s|did not settle within/);
+  assert.equal(bridgeResponse(fixture, "next")?.error, undefined, JSON.stringify(bridgeResponse(fixture, "next")));
+});
+
+test("cdp commands stop waiting at their deadline too", async () => {
+  const fixture = loadExtension({ debuggerCommandResult: (method) => (method === "Page.hang" ? new Promise(() => {}) : {}) });
+  fixture.tabs.set(7, { id: 7, windowId: 1, title: "cdp", url: "https://example.test/cdp" });
+  await assert.rejects(
+    () => within(2000, fixture.api.handleRequest("cdp", { tabId: 7, sessionId: "session-test", method: "Page.hang", params: {}, timeoutMs: 50 }), "cdp deadline"),
+    (error) => error?.code === "BROWSER_OPERATION_UNCERTAIN" && error?.cause?.details?.timedOut !== false,
+  );
+});
+
 test("new-tab setup tolerates a restricted about:blank document", async () => {
   const fixture = loadExtension({ restrictedPageError: 'Cannot access contents of url "about:blank". Extension manifest must request permission to access this host.' });
   const result = await fixture.api.handleRequest("new_tab", { url: "about:blank", wait: false, sessionId: "session-test" });

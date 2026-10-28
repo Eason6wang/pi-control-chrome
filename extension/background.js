@@ -8835,6 +8835,32 @@ function awaitWithSignal(promise, signal) {
   ]);
 }
 
+const DEBUGGER_OPERATION_DEADLINE_MS = 60_000;
+const DEBUGGER_OPERATION_DEADLINE_MAX_MS = 110_000;
+
+// A DevTools command can wait on the page forever (an awaitPromise evaluate whose promise never settles) and
+// cannot be cancelled. The Bridge queue runs one request at a time, so a request that only waits on such a
+// command holds every later page request (any tab) until the extension restarts. Stop waiting when the request
+// is cancelled or its deadline passes: the queue moves on and the abandoned command finishes or fails on its own.
+async function awaitDebuggerOperation(operation, signal, method, tabId, timeoutMs) {
+  const deadlineMs = boundedTimeout(timeoutMs, DEBUGGER_OPERATION_DEADLINE_MS, DEBUGGER_OPERATION_DEADLINE_MAX_MS);
+  operation.catch(() => {});
+  let timer;
+  const deadline = new Promise((_, reject) => {
+    timer = setTimeout(() => {
+      const error = new Error(`Browser ${method} did not settle within ${Math.round(deadlineMs / 1000)}s, so the extension stopped waiting for it; other browser calls keep working. The page may still be running it: inspect the page before retrying, and give long snippets their own deadline`);
+      error.code = "BROWSER_OPERATION_UNCERTAIN";
+      error.details = { actionState: "unknown", retryable: false, inspectFirst: true, tabId: Number(tabId), timedOut: true, deadlineMs };
+      reject(error);
+    }, deadlineMs);
+  });
+  try {
+    return await Promise.race([awaitWithSignal(operation, signal), deadline]);
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
 function assertRequestActive(signal) {
   if (signal?.aborted) throw signal.reason instanceof Error ? signal.reason : new Error("Browser request aborted");
 }
@@ -9258,7 +9284,7 @@ async function handleRequest(method, params, dispatchOptions = {}) {
     const tab = requestTab ?? await getTab(params.tabId, params, isReadOnlyTabRequest(method, params));
     const expectedFence = requestTabFence ?? authorizedTabFence(tab);
     try {
-      const result = await documentFencedDebuggerOperation(tab.id, (sendCommand) => sendCommand("Runtime.evaluate", { expression: String(params.expression || "undefined"), awaitPromise: params.awaitPromise !== false, returnByValue: true }), params.sessionId, expectedFence, method);
+      const result = await awaitDebuggerOperation(documentFencedDebuggerOperation(tab.id, (sendCommand) => sendCommand("Runtime.evaluate", { expression: String(params.expression || "undefined"), awaitPromise: params.awaitPromise !== false, returnByValue: true }), params.sessionId, expectedFence, method), signal, method, tab.id, params.timeoutMs);
       return { tabId: tab.id, result: boundEvaluateResult(result) };
     } catch (error) {
       if (error?.code === "BROWSER_OPERATION_UNCERTAIN") throw error;
@@ -9271,7 +9297,7 @@ async function handleRequest(method, params, dispatchOptions = {}) {
     const tab = requestTab ?? await getTab(params.tabId, params, isReadOnlyTabRequest(method, params));
     const expectedFence = requestTabFence ?? authorizedTabFence(tab);
     try {
-      const result = await documentFencedDebuggerOperation(tab.id, (sendCommand) => sendCommand(String(params.method), params.params || {}), params.sessionId, expectedFence, method);
+      const result = await awaitDebuggerOperation(documentFencedDebuggerOperation(tab.id, (sendCommand) => sendCommand(String(params.method), params.params || {}), params.sessionId, expectedFence, method), signal, method, tab.id, params.timeoutMs);
       return { tabId: tab.id, result };
     } catch (error) {
       if (error?.code === "BROWSER_OPERATION_UNCERTAIN") throw error;
