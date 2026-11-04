@@ -6820,7 +6820,7 @@ async function executeAxSemanticOperation(tabId, params, signal, expectedFence) 
           for (const mapping of candidateMappings) if (await callAccessibilityDomOperation(sendCommand, mapping.objectId, "isVisible", undefined, undefined, mapping.node.__sensitive, snapshotId)) visible.push(mapping);
           const selected = target.index === undefined ? visible : visible[Number(target.index)] === undefined ? [] : [visible[Number(target.index)]];
           if (selected.length === 0) throw chromiumAxSemanticError("AX_NODE_NOT_FOUND", "No visible Chromium accessibility node matched the semantic target", { count: 0, rebound: false, reason: "target_not_visible", retryable: true });
-          if (selected.length > 1) throw chromiumAxSemanticError("AX_NODE_AMBIGUOUS", "The semantic target matched multiple visible Chromium accessibility nodes; narrow the target before retrying", { count: selected.length, rebound: false });
+          if (selected.length > 1) throw chromiumAxSemanticError("AX_NODE_AMBIGUOUS", "The semantic target matched multiple visible Chromium accessibility nodes; narrow the target before retrying (add exact:true, a role, or index, or use a ref from browser_snapshot)", { count: selected.length, rebound: false });
           const mapping = selected[0];
           const element = { ...await callAccessibilityDomOperation(sendCommand, mapping.objectId, "describe", undefined, undefined, mapping.node.__sensitive, snapshotId), ...publicNode(mapping.node), resolvedBy: "chromium_ax" };
           assertRequestActive(signal);
