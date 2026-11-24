@@ -2188,6 +2188,14 @@ export default function piControlChrome(pi: ExtensionAPI): void {
   const skillPrompt = /<skill\s+name=["']pi-control-chrome["'](?:\s|>)/u;
   const browserSkillPaths = new Set<string>();
   const normalizedPath = (value: string) => resolve(value).toLowerCase();
+  // Runs started without a prompt (pi-gui's hidden "host restarted, carry on"
+  // message goes through sendCustomMessage) never emit before_agent_start, so
+  // browserSkillPaths stays empty for the whole run. Fall back to the packaged
+  // skill's own file name so reading it still turns the tools on.
+  const isBrowserSkillPath = (value: string) => {
+    const path = normalizedPath(value);
+    return browserSkillPaths.has(path) || /[\\/]skills[\\/]pi-control-chrome[\\/]skill\.md$/u.test(path);
+  };
   pi.on("before_agent_start", async event => {
     for (const skill of event.systemPromptOptions.skills ?? []) {
       if (skill.name === "pi-control-chrome") browserSkillPaths.add(normalizedPath(skill.filePath));
@@ -2195,7 +2203,7 @@ export default function piControlChrome(pi: ExtensionAPI): void {
     if (LAZY_TOOLS && skillPrompt.test(event.prompt)) setBrowserTools(true);
   });
   pi.on("tool_result", event => {
-    if (LAZY_TOOLS && !event.isError && event.toolName === "read" && typeof event.input.path === "string" && browserSkillPaths.has(normalizedPath(event.input.path))) {
+    if (LAZY_TOOLS && !event.isError && event.toolName === "read" && typeof event.input.path === "string" && isBrowserSkillPath(event.input.path)) {
       setBrowserTools(true);
       return;
     }
